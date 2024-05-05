@@ -1,0 +1,157 @@
+---
+title: "Synthetic Data Regression Assessment"
+author: "Andrew Engellant"
+date: "2024-04-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# The following code splits performs an 80/20 split into training and testing data
+library(tidymodels)
+library(here)
+library(readr)
+
+# read data
+d.git <- readr::read_tsv("knowlton_github.tsv")
+
+# split data into training and testing
+d_split <- initial_split(d.git, prop = 0.8)
+
+# save traiming and testing data as variables
+d_train <- training(d_split)
+d_test <- testing(d_split)
+```
+
+# Create a Regression Model
+```{r}
+# fit an initial model with all variables
+lm.git.initial <- linear_reg() %>%
+  set_engine("lm") %>%
+  fit(score ~ lines + stars + watchers +
+                forks + issues + 
+                language + 
+                license, data = d_train)
+
+
+
+summary(lm.git.initial$fit)
+anova(lm.git.initial$fit, test = "Chisq")
+
+# license appears unhelpful
+```
+
+For initial exploration of the data, I built a model including all of the variables. The coefficients and analysis of variance can be viewed above. I noticed that both license did not appear to have a significant impact on the model or in the analysis of variance. The lines coefficient also did not appear important in the model, but showed significance in the analysis of variance. To assess this further I looked for any multi-colinearity in the data.
+```{r}
+# remove lines with high correlation
+rm_corr <- d_train %>%
+  recipe(score ~ lines + stars + watchers +
+                forks + issues + 
+                language + 
+                license) %>%
+  step_corr(all_numeric_predictors(), threshold = 0.5) %>%
+  prep()
+
+d_train2 <- rm_corr %>%
+  bake(d_train)
+```
+
+Issues and lines have a strong correlation. Perhaps this means that when there are more lines of code generally there are more opportunities for issues to exist. I decided to exclude both lines and license from my final model. I also performed some minor transformations on the continuous data to help clean-up the coefficients.
+
+```{r}
+# Fit new model without lines and license and transformed variables for nicer coefficients 
+lm.git <- linear_reg() %>%
+  set_engine("lm") %>%
+  fit(score ~ I(forks/10^4) +
+                I(stars/10^5) + 
+                I(issues/10^4) + 
+                I(watchers/10^3) + 
+                language, data = d_train2)
+
+summary(lm.git$fit)
+```
+
+This final model is slightly better than the initial model, with an adjusted $R^2$ of `r summary(lm.git$fit)$adj.r.squared`. This means that `r round(summary(lm.git$fit)$adj.r.squared,2)*100`% of the total variance in repository scores can be explained by this model. A typical prediction by this model is off from the actual score by an average of `r summary(lm.git$fit)$sigma`. This model was created using only the training data. I then used the testing data to assess the model's performance.
+
+## Assessment of the Model
+```{r}
+# use model to make predictions on test data and assess performance
+lm.git %>%
+  predict(d_test) %>%
+  bind_cols(d_test) %>%
+  metrics(truth = score, estimate = .pred)
+```
+
+The $R^2$ value using this model on the testing data is 0.22 meaning only 22% of the total variance in repository scores can be explained by this model. A typical prediction by this model is an average of 0.147 points away from the actual repository score. A graph of the predicted scores vs actual scores can be viewed below. 
+
+```{r}
+# save predictions 
+graph <- lm.git %>%
+  predict(d_test) %>%
+  bind_cols(d_test)
+
+# plot the data with the model prediction
+ggplot(graph,
+       aes(x=.pred,y=score)) + 
+  geom_point(alpha=0.33) + 
+  theme_minimal() + 
+  labs(x="Predicted Score",y="Actual Score") + 
+  geom_abline(slope=1,intercept=0,col="gray50")
+```
+
+Overall this model helps explain some of the variance in repository score, however much of the variation in scores are attributed to variables not included in this model. A list of the coefficients for each variable considered in this model can be observed below.
+
+```{r}
+lm.git %>%
+  tidy()
+```
+
+Having more forks, stars, issues, and watchers all appear to increase the predicted repository score. Each additional ten thousand forks is associated with a 0.12 increase in predicted score. A 100,000 unit increase in stars is associated with a 0.26 unit increase in predicted score. Interestingly, a 10,000 unit increase in issues is associated with a 0.44 unit increase in predicted score. A 1000 unit increase in watchers is also associated with a 0.30 unit increase in predicted score. Some languages such as HTML/CSS and JavaScript are predicted to have higher scores than other languages such as VBA and Python when the other variables are the same. 
+
+
+## Tree Model
+```{r}
+#create decision tree using rpart
+tree <- decision_tree(mode = 'regression') %>%
+  set_engine("rpart") %>%
+  fit(score ~ forks + 
+              stars + 
+              issues + 
+              watchers + 
+              language, 
+      data = d_train2)
+
+# display tree
+rpart.plot::rpart.plot(tree$fit)
+```
+
+The above model is a depiction of the regression tree model created to model this data. The predicted vs actual scores graph can be viewed below, as well as the $R^2^ and residual standard error.
+
+```{r}
+# use model to make predictions on test data and assess performance
+tree %>%
+  predict(d_test) %>%
+  bind_cols(d_test) %>%
+  metrics(truth = score, estimate = .pred)
+```
+
+This regression tree model has the a lower $R^2$ and a similar $s_e$ value than the linear regression model. The decision tree only explains roughly 9% of the total variance in repository score, and a typical prediction was about 0.16 points from the true score. Let's look at a plot of the predicted vs actual scores.
+
+```{r}
+# save predictions 
+graph <- lm.git %>%
+  predict(d_test) %>%
+  bind_cols(d_test)
+
+# plot the data with the model prediction
+ggplot(graph,
+       aes(x=.pred,y=score)) + 
+  geom_point(alpha=0.33) + 
+  theme_minimal() + 
+  labs(x="Predicted Score",y="Actual Score") + 
+  geom_abline(slope=1,intercept=0,col="gray50")
+```
+
